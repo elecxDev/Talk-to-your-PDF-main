@@ -1,0 +1,19 @@
+name: .talk_to_pdf
+channels:
+  - conda-forge
+  - defaults
+dependencies:
+  - python=3.11
+  - pip
+  - pip:
+    - streamlit
+    - numpy
+    - openai
+    - requests
+    - pydrive
+    - python-dotenv
+    - oauth2client
+    - sqlalchemy
+    - pdfminer.six
+    - streamlit-lottie
+    - psycopg2-binary
