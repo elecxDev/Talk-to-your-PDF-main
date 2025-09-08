@@ -1,17 +1,16 @@
 # Import necessary libraries
 import streamlit as st
 import numpy as np
-import openai, os, requests, tempfile
-from google.cloud import aiplatform
+import os, requests, tempfile, json
+from mistralai.client import MistralClient
+from mistralai.models.chat_completion import ChatMessage
 
 from sqlalchemy import create_engine, text
 from sqlalchemy.orm import sessionmaker
 from sqlalchemy.exc import ProgrammingError
 from pdfminer.high_level import extract_text as pdf_extract_text
 from streamlit_lottie import st_lottie_spinner
-from pydrive.auth import GoogleAuth
-from pydrive.drive import GoogleDrive
-from oauth2client.service_account import ServiceAccountCredentials
+
 
 
 # Function to load Lottie animations using URL
@@ -46,10 +45,8 @@ class PreRunProcessor:
 
     def __init__(self):
         """
-        Initializes the processor with required API keys and connections.
+        Initializes the processor with database connection and Mistral client.
         """
-        # Load OpenAI API key from environment variables
-        self.api_key = os.getenv("OPENAI_API_KEY")
         # Establish connection to the PostgreSQL database from the Supabase platform
         self.engine = create_engine(
             st.secrets["SUPABASE_POSTGRES_URL"], echo=True, client_encoding="utf8"
@@ -57,17 +54,7 @@ class PreRunProcessor:
         # Create a session maker bound to this engine
         self.Session = sessionmaker(bind=self.engine)
         self.ensure_table_exists()
-        
-        # Set up Google Cloud credentials and project
-        os.environ["GOOGLE_APPLICATION_CREDENTIALS"] = st.secrets["GOOGLE_APPLICATION_CREDENTIALS"]
-        os.environ["GOOGLE_CLOUD_PROJECT"] = st.secrets["GOOGLE_PROJECT_ID"]
-        
-        # Initialize Google Cloud AI Platform
-        aiplatform.init(
-            project=st.secrets["GOOGLE_PROJECT_ID"],
-            location="us-central1"  # replace with your endpoint's location
-        )
-        self.vertex_endpoint = aiplatform.Endpoint(st.secrets["GOOGLE_ENDPOINT_ID"])
+        self.mistral_client = MistralClient(api_key=st.secrets["MISTRAL_API_KEY"])
 
     def pdf_to_text(self, uploaded_file, chunk_length: int = 1000) -> list:
         """
@@ -123,7 +110,7 @@ class PreRunProcessor:
                     CREATE TABLE pdf_holder (
                         id SERIAL PRIMARY KEY,
                         text TEXT,
-                        embedding VECTOR(3072)
+                        embedding VECTOR(1024)
                     );
                 """)
                 )
@@ -136,7 +123,7 @@ class PreRunProcessor:
 
     def _generate_embeddings(self, chunks: list) -> list:
         """
-        Generates embeddings for each text chunk using OpenAI's embedding model.
+        Generates embeddings for each text chunk using Mistral.
 
         Args:
         chunks (list): A list of text chunks.
@@ -147,16 +134,20 @@ class PreRunProcessor:
         try:
             # Filter out null characters from each chunk
             cleaned_chunks = [chunk.replace("\x00", "") for chunk in chunks]
-            response = openai.embeddings.create(
-                model="text-embedding-3-large", input=cleaned_chunks
-            )
-            return [
-                {
-                    "vector": embedding_info.embedding,
-                    "text": cleaned_chunks[embedding_info.index],
-                }
-                for embedding_info in response.data
-            ]
+            embeddings = []
+            
+            for chunk in cleaned_chunks:
+                response = self.mistral_client.embeddings(
+                    model="mistral-embed",
+                    input=[chunk]
+                )
+                embedding = response.data[0].embedding
+                embeddings.append({
+                    "vector": embedding,
+                    "text": chunk
+                })
+                    
+            return embeddings
         except Exception as e:
             st.error(f"An error occurred during embeddings generation: {e}")
             return []
@@ -203,25 +194,17 @@ class IntentService:
 
     def __init__(self):
         """
-        Initializes the IntentService with the required API keys and connections.
+        Initializes the IntentService with database connection and Mistral client.
         """
-        # Retrieve OpenAI API key from environment variables
-        self.api_key = os.getenv("OPENAI_API_KEY")
         # Establish a connection to the PostgreSQL database hosted on the Supabase platform
         self.engine = create_engine(
             st.secrets["SUPABASE_POSTGRES_URL"], echo=True, client_encoding="utf8"
         )
-        
-        # Initialize Google Cloud AI Platform
-        aiplatform.init(
-            project=st.secrets["GOOGLE_PROJECT_ID"],
-            location="us-central1"  # replace with your endpoint's location
-        )
-        self.vertex_endpoint = aiplatform.Endpoint(st.secrets["GOOGLE_ENDPOINT_ID"])
+        self.mistral_client = MistralClient(api_key=st.secrets["MISTRAL_API_KEY"])
 
     def detect_malicious_intent(self, question):
         """
-        Uses OpenAI's moderation model to detect malicious intent in a user's question.
+        Simple keyword-based malicious intent detection (free alternative).
 
         Args:
             question (str): The user's question as a string.
@@ -230,24 +213,18 @@ class IntentService:
             tuple: A boolean indicating if the question was flagged and a message explaining the result.
         """
         try:
-            # Create a moderation request to OpenAI API with the provided question
-            response = openai.moderations.create(
-                model="text-moderation-latest", input=question
-            )
-            # Determine if the question was flagged as malicious
-            is_flagged = response.results[0].flagged
+            # Simple keyword filtering for malicious content
+            malicious_keywords = ['hack', 'attack', 'exploit', 'malware', 'virus', 'illegal', 'bomb', 'weapon']
+            question_lower = question.lower()
+            
+            is_flagged = any(keyword in question_lower for keyword in malicious_keywords)
+            
             if is_flagged:
-                # Return true and a message if flagged
-                return (
-                    is_flagged,
-                    "This question has been flagged for malicious or inappropriate content...",
-                )
+                return True, "This question has been flagged for potentially inappropriate content..."
             else:
-                # Return false and a message if not flagged
-                return is_flagged, "No malicious intent detected..."
+                return False, "No malicious intent detected..."
         except Exception as e:
-            # Return none and an error message in case of an exception
-            return None, f"Error in moderation: {str(e).split('. ')[0]}."
+            return None, f"Error in moderation: {str(e)}"
 
     def query_database(self, query):
         """
@@ -267,7 +244,7 @@ class IntentService:
 
     def question_to_embeddings(self, question):
         """
-        Converts a user's question into vector embeddings using Google's text-embedding-005 model.
+        Converts a user's question into vector embeddings using Mistral.
 
         Args:
             question (str): The user's question as a string.
@@ -276,19 +253,18 @@ class IntentService:
             list: The vectorized form of the question as a list or an empty list on failure.
         """
         try:
-            # Generate embeddings for the question using Google's text-embedding-005 model
-            response = self.vertex_endpoint.predict(instances=[question])
-            embedded_query = response[0]
+            response = self.mistral_client.embeddings(
+                model="mistral-embed",
+                input=[question]
+            )
+            embedding = response.data[0].embedding
             # Verify the dimensionality of the embedding
-            if len(embedded_query) != 1024:
+            if len(embedding) != 1024:
                 raise ValueError(
                     "The dimensionality of the question embedding does not match the expected 1024 dimensions."
                 )
-            else:
-                # Convert the embedding to a numpy array and return it as a list
-                return np.array(embedded_query, dtype=np.float64).tolist()
+            return embedding
         except Exception as e:
-            # Log and return an empty list in case of an error
             print(f"Error embedding the question: {e}")
             return []
 
@@ -347,39 +323,28 @@ class InformationRetrievalService:
 
     def __init__(self):
         """
-        Initializes the InformationRetrievalService with OpenAI API key and database connection.
+        Initializes the InformationRetrievalService with database connection and Mistral client.
         """
-        # Retrieve OpenAI API key from environment variables
-        self.api_key = os.getenv("OPENAI_API_KEY")
         # Establish connection to the PostgreSQL database on the Supabase platform
         self.engine = create_engine(
             st.secrets["SUPABASE_POSTGRES_URL"], echo=True, client_encoding="utf8"
         )
         # Create a session maker bound to this engine
         self.Session = sessionmaker(bind=self.engine)
-        
-        # Initialize Google Cloud AI Platform
-        aiplatform.init(
-            project=st.secrets["GOOGLE_PROJECT_ID"],
-            location="us-central1"  # replace with your endpoint's location
-        )
-        self.vertex_endpoint = aiplatform.Endpoint(st.secrets["GOOGLE_ENDPOINT_ID"])
+        self.mistral_client = MistralClient(api_key=st.secrets["MISTRAL_API_KEY"])
 
-    def search_in_vector_store(self, question: str, k: int = 1) -> str:
+    def search_in_vector_store(self, question_embedding, k: int = 1) -> str:
         """
-        Searches for the closest matching text in the vector store to a given question.
+        Searches for the closest matching text in the vector store using a pre-computed embedding.
 
         Args:
-            question (str): The question to search for.
+            question_embedding: The pre-computed embedding vector for the question.
             k (int): The number of top results to retrieve, defaults to 1.
 
         Returns:
             str: The text of the closest matching document or None if no match is found.
         """
         try:
-            # Generate embeddings for the question using Google's text-embedding-005 model
-            vectorized_question = self.vertex_endpoint.predict(instances=[question])[0]
-            
             # SQL query to find the closest match in the vector store
             sql_query = text("""
                 SELECT id, text, embedding <=> CAST(:query_vector AS VECTOR) AS distance
@@ -390,7 +355,7 @@ class InformationRetrievalService:
             # Execute the query with the vectorized question and k value
             with self.engine.connect() as conn:
                 results = conn.execute(
-                    sql_query, {"query_vector": vectorized_question, "k": k}
+                    sql_query, {"query_vector": question_embedding, "k": k}
                 ).fetchall()
                 if results:
                     # Return the text of the closest match if results are found
@@ -406,19 +371,18 @@ class InformationRetrievalService:
 ##### Response service #####
 class ResponseService:
     """
-    Generates responses to user questions by integrating with OpenAI's ChatCompletion.
+    Generates responses to user questions by integrating with Ollama.
     """
 
     def __init__(self):
         """
-        Initializes the ResponseService with the OpenAI API key.
+        Initializes the ResponseService with Mistral client.
         """
-        # Load OpenAI API key from environment variables
-        self.api_key = os.getenv("OPENAI_API_KEY")
+        self.mistral_client = MistralClient(api_key=st.secrets["MISTRAL_API_KEY"])
 
     def generate_response(self, question, retrieved_info):
         """
-        Generates a response using OpenAI's ChatCompletion API based on the provided question and retrieved information.
+        Generates a response using Mistral based on the provided question and retrieved information.
 
         Args:
             question (str): The user's question.
@@ -427,98 +391,38 @@ class ResponseService:
         Returns:
             str: The generated response or an error message if no response is available.
         """
-        # Generate a response using the ChatCompletion API with the question and retrieved information
-        response = openai.chat.completions.create(
-            model="gpt-4-turbo",
-            messages=[
-                {
-                    "role": "user",
-                    "content": "Based on the FACTS, give a concise and detailed answer to the QUESTION."
-                    + f"QUESTION: {question}. FACTS: {retrieved_info}",
-                }
-            ],
-        )
+        try:
+            messages = [
+                ChatMessage(role="user", content=f"""You are an expert document analyst. Based on the provided context from a PDF document, give a comprehensive and well-structured answer to the user's question.
 
-        if response.choices and response.choices[0].message.content:
-            # Return the generated response if available
+Context from PDF:
+{retrieved_info}
+
+User Question: {question}
+
+Instructions:
+- Provide a clear, informative response based solely on the PDF content
+- Structure your answer with proper paragraphs if needed
+- Be specific and cite relevant details from the document
+- If the context doesn't fully answer the question, acknowledge what information is available
+- Keep the tone professional yet accessible""")
+            ]
+            
+            response = self.mistral_client.chat(
+                model="mistral-small",
+                messages=messages
+            )
+            
             return response.choices[0].message.content
-        else:
-            # Display an error if no content is generated
-            st.error("No content available.")
+        except Exception as e:
+            st.error(f"Error generating response: {e}")
+            return "Sorry, I couldn't generate a response at this time."
 
 
 ###### Independant & dependant of the function's class ######
 
 
-# Securely uploads a file to Google Drive and ensures the temporary file is deleted after upload
-def upload_to_google_drive(uploaded_file):
-    """
-    Uploads a file to Google Drive using service account credentials, makes it publicly viewable,
-    and returns a shareable link for the uploaded file.
 
-    Args:
-        uploaded_file: The file uploaded by the user through the Streamlit interface.
-
-    Returns:
-        str: The shareable link of the uploaded file.
-    """
-    # Define the scope for Google Drive API access to allow file uploading and sharing.
-    scope = [
-        "https://www.googleapis.com/auth/drive.file",
-        "https://www.googleapis.com/auth/drive",
-    ]
-
-    # Load Google Drive API credentials from Streamlit secrets
-    credentials_info = st.secrets["google_credentials"]
-
-    # Convert credentials info to a dictionary suitable for the oauth2client library.
-    # This step formats the credentials in a way that GoogleAuth can use for authentication.
-    credentials_dict = {key: value for key, value in credentials_info.items()}
-
-    # Authenticate using the service account credentials to access Google Drive.
-    credentials = ServiceAccountCredentials.from_json_keyfile_dict(
-        credentials_dict, scope
-    )
-    gauth = GoogleAuth()
-    gauth.credentials = credentials  # Set the authenticated credentials
-    drive = GoogleDrive(
-        gauth
-    )  # Create a GoogleDrive instance with authenticated GoogleAuth instance
-
-    # Use a temporary file to store the uploaded file's content.
-    # This approach avoids loading the entire file content into memory, which is efficient for large files.
-    with tempfile.NamedTemporaryFile(
-        delete=False, suffix="-" + uploaded_file.name
-    ) as temp_file:
-        temp_file.write(
-            uploaded_file.read()
-        )  # Write the uploaded file content to the temporary file
-        temp_file_path = (
-            temp_file.name
-        )  # Store the path of the temporary file for later use in uploading
-
-    try:
-        # Create a new file on Google Drive using the uploaded file's name.
-        file_drive = drive.CreateFile({"title": uploaded_file.name})
-        # Set the content of the Google Drive file to that of the temporary file.
-        file_drive.SetContentFile(temp_file_path)
-        file_drive.Upload()  # Upload the file to Google Drive
-
-        # Change the uploaded file's sharing settings to make it viewable by anyone with the link.
-        file_drive.InsertPermission(
-            {"type": "anyone", "value": "anyone", "role": "reader"}
-        )
-
-        # Format the shareable link for preview.
-        shareable_link = f"https://drive.google.com/file/d/{file_drive['id']}/preview"
-
-        # Print the shareable link for testing purposes.
-        st.write("Shareable link:", shareable_link)
-
-    finally:
-        # Ensure the temporary file is deleted after the upload process is complete.
-        # This cleanup step prevents accumulation of temporary files on the server.
-        os.unlink(temp_file_path)
 
 
 # Orchestrates the processing of user questions regarding PDF content
@@ -617,88 +521,137 @@ def main():
     """
     The main function to run the Streamlit app, including a PDF viewer.
     """
-    # Set OpenAI API key from secrets
-    openai.api_key = st.secrets["OPENAI_API_KEY"]
-    
-    # Set up Google Cloud environment
-    os.environ["GOOGLE_APPLICATION_CREDENTIALS"] = st.secrets["GOOGLE_APPLICATION_CREDENTIALS"]
-    os.environ["GOOGLE_CLOUD_PROJECT"] = st.secrets["GOOGLE_PROJECT_ID"]
+    # Check if Mistral API key is provided
+    if "MISTRAL_API_KEY" not in st.secrets:
+        st.error("Mistral API key not found!")
+        st.info("1. Get free API key from https://console.mistral.ai\n2. Add MISTRAL_API_KEY to your .streamlit/secrets.toml")
+        return
 
-    # Custom CSS styles for purple and pink theme
+    # Custom CSS styles for modern design
     st.markdown("""
         <style>
-        /* Main title */
-        .stTitle {
-            color: #9C27B0 !important;
-            text-shadow: 2px 2px 4px rgba(0,0,0,0.1);
+        @import url('https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700&display=swap');
+        
+        .main {
+            font-family: 'Inter', sans-serif;
         }
         
         /* Buttons */
         .stButton>button {
-            background-color: #E91E63;
+            background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
             color: white;
             border: none;
-            border-radius: 20px;
-            padding: 10px 25px;
+            border-radius: 12px;
+            padding: 12px 24px;
+            font-weight: 500;
             transition: all 0.3s ease;
+            box-shadow: 0 4px 15px rgba(102, 126, 234, 0.3);
         }
         .stButton>button:hover {
-            background-color: #C2185B;
             transform: translateY(-2px);
-            box-shadow: 0 4px 8px rgba(0,0,0,0.1);
+            box-shadow: 0 8px 25px rgba(102, 126, 234, 0.4);
         }
         
         /* File uploader */
         .stFileUploader {
-            border: 2px dashed #9C27B0;
-            border-radius: 10px;
-            padding: 20px;
-            background: rgba(156, 39, 176, 0.05);
+            border: 2px dashed #667eea;
+            border-radius: 16px;
+            padding: 24px;
+            background: linear-gradient(135deg, rgba(102, 126, 234, 0.05) 0%, rgba(118, 75, 162, 0.05) 100%);
         }
         
         /* Text input */
         .stTextInput>div>div>input {
-            border: 2px solid #E91E63;
-            border-radius: 20px;
-            padding: 10px 20px;
+            border: 2px solid #e1e5e9;
+            border-radius: 12px;
+            padding: 12px 16px;
+            font-size: 16px;
+            transition: all 0.3s ease;
         }
         .stTextInput>div>div>input:focus {
-            border-color: #9C27B0;
-            box-shadow: 0 0 0 2px rgba(156, 39, 176, 0.2);
+            border-color: #667eea;
+            box-shadow: 0 0 0 3px rgba(102, 126, 234, 0.1);
+        }
+        
+        /* Container styles */
+        .upload-container, .question-container {
+            background: white;
+            border-radius: 16px;
+            padding: 24px;
+            margin: 24px 0;
+            box-shadow: 0 4px 20px rgba(0, 0, 0, 0.08);
+            border: 1px solid #f0f0f0;
+        }
+        
+        /* Response container */
+        .response-container {
+            background: white;
+            border-radius: 16px;
+            padding: 0;
+            margin: 24px 0;
+            box-shadow: 0 4px 20px rgba(0, 0, 0, 0.08);
+            border: 1px solid #f0f0f0;
+            overflow: hidden;
+        }
+        
+        .response-header {
+            background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+            color: white;
+            padding: 16px 24px;
+            display: flex;
+            align-items: center;
+            gap: 12px;
+        }
+        
+        .response-header h3 {
+            margin: 0;
+            font-size: 18px;
+            font-weight: 600;
+        }
+        
+        .response-content {
+            padding: 24px;
+            line-height: 1.6;
+            color: #2d3748;
         }
         
         /* Success messages */
         .stSuccess {
-            background-color: rgba(233, 30, 99, 0.1);
-            border-left: 4px solid #E91E63;
+            background: linear-gradient(135deg, rgba(72, 187, 120, 0.1) 0%, rgba(56, 178, 172, 0.1) 100%);
+            border-left: 4px solid #48bb78;
+            border-radius: 8px;
         }
         
         /* Error messages */
         .stError {
-            background-color: rgba(156, 39, 176, 0.1);
-            border-left: 4px solid #9C27B0;
+            background: linear-gradient(135deg, rgba(245, 101, 101, 0.1) 0%, rgba(237, 100, 166, 0.1) 100%);
+            border-left: 4px solid #f56565;
+            border-radius: 8px;
         }
+        
+        /* Hide Streamlit branding */
+        #MainMenu {visibility: hidden;}
+        footer {visibility: hidden;}
+        header {visibility: hidden;}
         </style>
     """, unsafe_allow_html=True)
 
     # Display the app's title with custom styling
-    st.title("💬 Talk to your PDF")
+    st.markdown("""
+        <div style="text-align: center; padding: 2rem 0;">
+            <h1 style="background: linear-gradient(135deg, #667eea 0%, #764ba2 100%); -webkit-background-clip: text; -webkit-text-fill-color: transparent; font-size: 3rem; font-weight: 700; margin-bottom: 0.5rem;">
+                <i data-lucide="message-circle"></i> Talk to your PDF
+            </h1>
+            <p style="color: #666; font-size: 1.2rem; margin: 0;">Upload a PDF and ask questions about its content</p>
+        </div>
+        <script src="https://unpkg.com/lucide@latest/dist/umd/lucide.js"></script>
+        <script>lucide.createIcons();</script>
+    """, unsafe_allow_html=True)
 
     # Create a file uploader widget for PDF files with custom styling
-    st.markdown("""
-        <style>
-        .upload-container {
-            background-color: rgba(156, 39, 176, 0.05);
-            border-radius: 15px;
-            padding: 20px;
-            margin: 20px 0;
-            border: 2px solid rgba(233, 30, 99, 0.2);
-        }
-        </style>
-    """, unsafe_allow_html=True)
     
     st.markdown('<div class="upload-container">', unsafe_allow_html=True)
-    st.markdown("### 📚 Upload your PDF document")
+    st.markdown("### <i data-lucide='upload'></i> Upload your PDF document", unsafe_allow_html=True)
     uploaded_file = st.file_uploader("Choose a PDF file to analyze", type=["pdf"])
     st.markdown('</div>', unsafe_allow_html=True)
 
@@ -710,31 +663,20 @@ def main():
         ):
             process_pre_run(uploaded_file)  # Preprocess the uploaded file
 
-        # Securely upload the processed file to Google Drive
-        upload_to_google_drive(uploaded_file)
+
 
         # Instantiate the service class for intent processing
         service_class = IntentService()
 
         # Create a form for user's questions about the PDF content
-        st.markdown("""
-            <style>
-            .question-container {
-                background-color: rgba(156, 39, 176, 0.05);
-                border-radius: 15px;
-                padding: 20px;
-                margin: 20px 0;
-                border: 2px solid rgba(233, 30, 99, 0.2);
-            }
-            </style>
-        """, unsafe_allow_html=True)
 
         st.markdown('<div class="question-container">', unsafe_allow_html=True)
+        st.markdown("### <i data-lucide='help-circle'></i> Ask a question about the PDF content", unsafe_allow_html=True)
         with st.form(key="question_form"):
             user_question = st.text_input(
-                "✨ Ask a question about the PDF content:", key="question_input"
+                "Enter your question:", key="question_input", placeholder="What is this document about?"
             )
-            submit_button = st.form_submit_button(label="🔍 Ask")
+            submit_button = st.form_submit_button(label="Ask Question")
         st.markdown('</div>', unsafe_allow_html=True)
 
         # Process the question if the submit button is pressed
@@ -754,7 +696,24 @@ def main():
                     final_response = process_response(
                         retrieved_info, question
                     )  # Generate and display response
-                    st.write(final_response)
+                    
+                    # Display response in a modern card format
+                    st.markdown("""
+                        <div class="response-container">
+                            <div class="response-header">
+                                <i data-lucide="brain"></i>
+                                <h3>AI Response</h3>
+                            </div>
+                            <div class="response-content">
+                    """, unsafe_allow_html=True)
+                    
+                    st.markdown(final_response)
+                    
+                    st.markdown("""
+                            </div>
+                        </div>
+                        <script>lucide.createIcons();</script>
+                    """, unsafe_allow_html=True)
 
 
 # Entry point of the Streamlit app
