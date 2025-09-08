@@ -48,13 +48,15 @@ class PreRunProcessor:
         Initializes the processor with database connection and Mistral client.
         """
         # Establish connection to the PostgreSQL database from the Supabase platform
+        db_url = os.getenv("SUPABASE_POSTGRES_URL") or st.secrets.get("SUPABASE_POSTGRES_URL")
         self.engine = create_engine(
-            st.secrets["SUPABASE_POSTGRES_URL"], echo=True, client_encoding="utf8"
+            db_url, echo=True, client_encoding="utf8"
         )
         # Create a session maker bound to this engine
         self.Session = sessionmaker(bind=self.engine)
         self.ensure_table_exists()
-        self.mistral_client = MistralClient(api_key=st.secrets["MISTRAL_API_KEY"])
+        mistral_key = os.getenv("MISTRAL_API_KEY") or st.secrets.get("MISTRAL_API_KEY")
+        self.mistral_client = MistralClient(api_key=mistral_key)
 
     def pdf_to_text(self, uploaded_file, chunk_length: int = 1000) -> list:
         """
@@ -197,10 +199,12 @@ class IntentService:
         Initializes the IntentService with database connection and Mistral client.
         """
         # Establish a connection to the PostgreSQL database hosted on the Supabase platform
+        db_url = os.getenv("SUPABASE_POSTGRES_URL") or st.secrets.get("SUPABASE_POSTGRES_URL")
         self.engine = create_engine(
-            st.secrets["SUPABASE_POSTGRES_URL"], echo=True, client_encoding="utf8"
+            db_url, echo=True, client_encoding="utf8"
         )
-        self.mistral_client = MistralClient(api_key=st.secrets["MISTRAL_API_KEY"])
+        mistral_key = os.getenv("MISTRAL_API_KEY") or st.secrets.get("MISTRAL_API_KEY")
+        self.mistral_client = MistralClient(api_key=mistral_key)
 
     def detect_malicious_intent(self, question):
         """
@@ -326,12 +330,14 @@ class InformationRetrievalService:
         Initializes the InformationRetrievalService with database connection and Mistral client.
         """
         # Establish connection to the PostgreSQL database on the Supabase platform
+        db_url = os.getenv("SUPABASE_POSTGRES_URL") or st.secrets.get("SUPABASE_POSTGRES_URL")
         self.engine = create_engine(
-            st.secrets["SUPABASE_POSTGRES_URL"], echo=True, client_encoding="utf8"
+            db_url, echo=True, client_encoding="utf8"
         )
         # Create a session maker bound to this engine
         self.Session = sessionmaker(bind=self.engine)
-        self.mistral_client = MistralClient(api_key=st.secrets["MISTRAL_API_KEY"])
+        mistral_key = os.getenv("MISTRAL_API_KEY") or st.secrets.get("MISTRAL_API_KEY")
+        self.mistral_client = MistralClient(api_key=mistral_key)
 
     def search_in_vector_store(self, question_embedding, k: int = 1) -> str:
         """
@@ -378,7 +384,8 @@ class ResponseService:
         """
         Initializes the ResponseService with Mistral client.
         """
-        self.mistral_client = MistralClient(api_key=st.secrets["MISTRAL_API_KEY"])
+        mistral_key = os.getenv("MISTRAL_API_KEY") or st.secrets.get("MISTRAL_API_KEY")
+        self.mistral_client = MistralClient(api_key=mistral_key)
 
     def generate_response(self, question, retrieved_info):
         """
@@ -393,20 +400,19 @@ class ResponseService:
         """
         try:
             messages = [
-                ChatMessage(role="user", content=f"""Answer the user's question using the PDF context. Format your response in markdown for better readability.
+                ChatMessage(role="user", content=f"""Answer the user's question using the PDF context. Format your response in markdown.
 
 PDF Context: {retrieved_info}
 
 Question: {question}
 
 Instructions:
-- Format response in markdown with proper headings, bullet points, etc.
-- Keep it concise but well-structured
-- Use **bold** for key terms
-- Use bullet points for lists
-- Use ### for subheadings if needed
-- Only answer what was specifically asked
-- If you can't answer from context, say so briefly""")
+- Give a direct, helpful answer using the PDF information
+- Format in markdown with **bold** for key terms and bullet points for lists
+- Don't add disclaimers about what the context does/doesn't mention
+- Don't explain your limitations or the source material
+- Just answer the question naturally and helpfully
+- If you can't answer, just say "I don't have that information in the document"""")
             ]
             
             response = self.mistral_client.chat(
@@ -519,8 +525,9 @@ def process_response(retrieved_info, question):
 
 
 def main():
-    # Check API key
-    if "MISTRAL_API_KEY" not in st.secrets:
+    # Check API key (works for both local and Vercel)
+    mistral_key = os.getenv("MISTRAL_API_KEY") or st.secrets.get("MISTRAL_API_KEY")
+    if not mistral_key:
         st.error("Mistral API key not found!")
         return
 
