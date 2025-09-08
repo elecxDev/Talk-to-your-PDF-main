@@ -12,7 +12,7 @@
     }
   ],
   "env": {
-    "MISTRAL_API_KEY": "@mistral_api_key",
-    "SUPABASE_POSTGRES_URL": "@supabase_postgres_url"
+    "MISTRAL_API_KEY": "@MISTRAL_API_KEY",
+    "SUPABASE_POSTGRES_URL": "@SUPABASE_POSTGRES_URL"
   }
 }
