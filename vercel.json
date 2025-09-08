@@ -10,9 +10,5 @@
       "src": "/(.*)",
       "dest": "streamlit_app.py"
     }
-  ],
-  "env": {
-    "MISTRAL_API_KEY": "@MISTRAL_API_KEY",
-    "SUPABASE_POSTGRES_URL": "@SUPABASE_POSTGRES_URL"
-  }
+  ]
 }
