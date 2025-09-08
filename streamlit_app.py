@@ -5,9 +5,7 @@ import os, requests, tempfile, json
 from mistralai.client import MistralClient
 from mistralai.models.chat_completion import ChatMessage
 
-from sqlalchemy import create_engine, text
-from sqlalchemy.orm import sessionmaker
-from sqlalchemy.exc import ProgrammingError
+
 from pdfminer.high_level import extract_text as pdf_extract_text
 from streamlit_lottie import st_lottie_spinner
 
@@ -45,25 +43,8 @@ class PreRunProcessor:
 
     def __init__(self):
         """
-        Initializes the processor with database connection and Mistral client.
+        Initializes the processor with Mistral client.
         """
-        # Establish connection to the PostgreSQL database from the Supabase platform
-        db_url = os.getenv("SUPABASE_POSTGRES_URL") or st.secrets.get("SUPABASE_POSTGRES_URL")
-        if not db_url:
-            raise ValueError("Database URL not found in environment variables or secrets")
-        
-        try:
-            self.engine = create_engine(
-                db_url, echo=False, client_encoding="utf8", pool_timeout=30, pool_recycle=3600
-            )
-            # Create a session maker bound to this engine
-            self.Session = sessionmaker(bind=self.engine)
-            self.ensure_table_exists()
-        except Exception as e:
-            st.error(f"Database connection failed: {str(e)}")
-            st.error("Please check if your Supabase database is active and accessible.")
-            raise
-        
         mistral_key = os.getenv("MISTRAL_API_KEY") or st.secrets.get("MISTRAL_API_KEY")
         if not mistral_key:
             raise ValueError("Mistral API key not found")
@@ -91,7 +72,7 @@ class PreRunProcessor:
 
     def define_vector_store(self, embeddings: list) -> bool:
         """
-        Stores the generated embeddings in the database.
+        Stores the generated embeddings in session state.
 
         Args:
         embeddings (list): A list of dictionaries containing text and their corresponding embeddings.
@@ -99,40 +80,13 @@ class PreRunProcessor:
         Returns:
         bool: True if the operation succeeds, False otherwise.
         """
-        session = self.Session()  # Create a new database session
         try:
-            # Truncate the existing table and insert new embeddings
-            session.execute(text("TRUNCATE TABLE pdf_holder RESTART IDENTITY CASCADE;"))
-            for embedding in embeddings:
-                # Insert each embedding into the pdf_holder table
-                import json
-                session.execute(
-                    text(
-                        "INSERT INTO pdf_holder (text, embedding) VALUES (:text, :embedding)"
-                    ),
-                    {"text": embedding["text"], "embedding": json.dumps(embedding["vector"])},
-                )
-            session.commit()  # Commit the changes
+            # Store embeddings in Streamlit session state
+            st.session_state.pdf_embeddings = embeddings
             return True
-        except ProgrammingError as e:
-            if 'relation "pdf_holder" does not exist' in str(e.orig.pgerror):
-                # If the table doesn't exist, create it and the necessary extension
-                session.rollback()
-                session.execute(
-                    text("""
-                    CREATE TABLE pdf_holder (
-                        id SERIAL PRIMARY KEY,
-                        text TEXT,
-                        embedding TEXT
-                    );
-                """)
-                )
-                session.commit()
-                return False
-            else:
-                raise
-        finally:
-            session.close()  # Close the session
+        except Exception as e:
+            st.error(f"Error storing embeddings: {e}")
+            return False
 
     def _generate_embeddings(self, chunks: list) -> list:
         """
@@ -165,22 +119,7 @@ class PreRunProcessor:
             st.error(f"An error occurred during embeddings generation: {e}")
             return []
 
-    def ensure_table_exists(self):
-        try:
-            with self.engine.connect() as conn:
-                conn.execute(
-                    text("""
-                    CREATE TABLE IF NOT EXISTS pdf_holder (
-                        id SERIAL PRIMARY KEY,
-                        text TEXT,
-                        embedding TEXT
-                    );
-                """)
-                )
-                conn.commit()
-        except Exception as e:
-            st.error(f"Failed to create database table: {str(e)}")
-            raise
+
 
 
 # Function to process the uploaded PDF before any user interaction
@@ -205,18 +144,13 @@ def process_pre_run(uploaded_file):
 class IntentService:
     """
     Handles the detection of malicious intent in user queries, conversion of questions to embeddings,
-    and checks the relatedness of questions to PDF content via database queries.
+    and checks the relatedness of questions to PDF content.
     """
 
     def __init__(self):
         """
-        Initializes the IntentService with database connection and Mistral client.
+        Initializes the IntentService with Mistral client.
         """
-        # Establish a connection to the PostgreSQL database hosted on the Supabase platform
-        db_url = os.getenv("SUPABASE_POSTGRES_URL") or st.secrets.get("SUPABASE_POSTGRES_URL")
-        self.engine = create_engine(
-            db_url, echo=True, client_encoding="utf8"
-        )
         mistral_key = os.getenv("MISTRAL_API_KEY") or st.secrets.get("MISTRAL_API_KEY")
         self.mistral_client = MistralClient(api_key=mistral_key)
 
@@ -288,7 +222,7 @@ class IntentService:
 
     def check_relatedness_to_pdf_content(self, question):
         """
-        Determines if a user's question is related to PDF content stored in the database by querying for similar embeddings.
+        Determines if a user's question is related to PDF content stored in session state.
 
         Args:
             question (str): The user's question as a string.
@@ -296,25 +230,15 @@ class IntentService:
         Returns:
             tuple: A boolean indicating relatedness and a message explaining the result.
         """
-        # Convert the question to vector embeddings
-        question_vectorized = self.question_to_embeddings(question)
-
         try:
-            # Simple text-based similarity check since vector extension is not available
-            with self.engine.connect() as conn:
-                result = conn.execute(
-                    text("SELECT id, text FROM pdf_holder LIMIT 1;"),
-                ).fetchone()
-
-                if result:
-                    # For now, assume all questions are related to PDF content
-                    # This is a simplified approach without vector similarity
-                    return True, "Question is related to the PDF content..."
-                else:
-                    return False, "No PDF content found in the database."
+            # Check if PDF embeddings exist in session state
+            if hasattr(st.session_state, 'pdf_embeddings') and st.session_state.pdf_embeddings:
+                return True, "Question is related to the PDF content..."
+            else:
+                return False, "No PDF content found. Please upload a PDF first."
         except Exception as e:
-            print(f"Error searching the database: {e}")
-            return False, f"Error searching the database: {e}"
+            print(f"Error checking PDF content: {e}")
+            return False, f"Error checking PDF content: {e}"
 
 
 ##### Information retrieval service #####
@@ -322,52 +246,37 @@ class IntentService:
 
 class InformationRetrievalService:
     """
-    Provides services for searching vectorized questions within a vector store in the database.
+    Provides services for searching questions within stored PDF content.
     """
 
     def __init__(self):
         """
-        Initializes the InformationRetrievalService with database connection and Mistral client.
+        Initializes the InformationRetrievalService with Mistral client.
         """
-        # Establish connection to the PostgreSQL database on the Supabase platform
-        db_url = os.getenv("SUPABASE_POSTGRES_URL") or st.secrets.get("SUPABASE_POSTGRES_URL")
-        self.engine = create_engine(
-            db_url, echo=True, client_encoding="utf8"
-        )
-        # Create a session maker bound to this engine
-        self.Session = sessionmaker(bind=self.engine)
         mistral_key = os.getenv("MISTRAL_API_KEY") or st.secrets.get("MISTRAL_API_KEY")
         self.mistral_client = MistralClient(api_key=mistral_key)
 
     def search_in_vector_store(self, question_embedding, k: int = 1) -> str:
         """
-        Searches for the closest matching text in the vector store using a pre-computed embedding.
+        Searches for relevant text in the stored PDF content.
 
         Args:
             question_embedding: The pre-computed embedding vector for the question.
             k (int): The number of top results to retrieve, defaults to 1.
 
         Returns:
-            str: The text of the closest matching document or None if no match is found.
+            str: The text of the first available document or None if no match is found.
         """
         try:
-            # Simple text retrieval since vector similarity is not available
-            sql_query = text("""
-                SELECT text FROM pdf_holder
-                ORDER BY id
-                LIMIT :k
-            """)
-            with self.engine.connect() as conn:
-                results = conn.execute(
-                    sql_query, {"k": k}
-                ).fetchall()
-                if results:
-                    # Return the first available text chunk
-                    return results[0].text
-                else:
-                    st.error("No documents found.")
+            # Get PDF embeddings from session state
+            if hasattr(st.session_state, 'pdf_embeddings') and st.session_state.pdf_embeddings:
+                # Return the first text chunk (simplified approach)
+                return st.session_state.pdf_embeddings[0]["text"]
+            else:
+                st.error("No PDF content found.")
+                return None
         except Exception as e:
-            st.error(f"Error searching database: {e}")
+            st.error(f"Error retrieving content: {e}")
             return None
 
 
@@ -522,7 +431,7 @@ def process_response(retrieved_info, question):
 
 
 def main():
-    # Check API key (works for both local and Vercel)
+    # Check API key
     mistral_key = os.getenv("MISTRAL_API_KEY") or st.secrets.get("MISTRAL_API_KEY")
     if not mistral_key:
         st.error("Mistral API key not found!")
@@ -535,6 +444,8 @@ def main():
         st.session_state.pdf_processed = False
     if "service_class" not in st.session_state:
         st.session_state.service_class = None
+    if "pdf_embeddings" not in st.session_state:
+        st.session_state.pdf_embeddings = []
 
     # Dark gray theme with proper layout
     st.markdown("""
@@ -709,6 +620,7 @@ def main():
                 st.session_state.pdf_processed = False
                 st.session_state.messages = []
                 st.session_state.service_class = None
+                st.session_state.pdf_embeddings = []
                 st.rerun()
         with col2:
             if st.button("Clear Chat"):
