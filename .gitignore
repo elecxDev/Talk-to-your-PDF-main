@@ -2,7 +2,6 @@
 .env
 
 # Credentials
-*.json
 credentials.json
 client_secrets.json
 google_credentials.json
