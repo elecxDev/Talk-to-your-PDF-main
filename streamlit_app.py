@@ -393,19 +393,20 @@ class ResponseService:
         """
         try:
             messages = [
-                ChatMessage(role="user", content=f"""You are an expert document analyst. Based on the provided context from a PDF document, give a comprehensive and well-structured answer to the user's question.
+                ChatMessage(role="user", content=f"""Answer the user's question using the PDF context. Format your response in markdown for better readability.
 
-Context from PDF:
-{retrieved_info}
+PDF Context: {retrieved_info}
 
-User Question: {question}
+Question: {question}
 
 Instructions:
-- Provide a clear, informative response based solely on the PDF content
-- Structure your answer with proper paragraphs if needed
-- Be specific and cite relevant details from the document
-- If the context doesn't fully answer the question, acknowledge what information is available
-- Keep the tone professional yet accessible""")
+- Format response in markdown with proper headings, bullet points, etc.
+- Keep it concise but well-structured
+- Use **bold** for key terms
+- Use bullet points for lists
+- Use ### for subheadings if needed
+- Only answer what was specifically asked
+- If you can't answer from context, say so briefly""")
             ]
             
             response = self.mistral_client.chat(
@@ -518,16 +519,20 @@ def process_response(retrieved_info, question):
 
 
 def main():
-    """
-    The main function to run the Streamlit app, including a PDF viewer.
-    """
-    # Check if Mistral API key is provided
+    # Check API key
     if "MISTRAL_API_KEY" not in st.secrets:
         st.error("Mistral API key not found!")
-        st.info("1. Get free API key from https://console.mistral.ai\n2. Add MISTRAL_API_KEY to your .streamlit/secrets.toml")
         return
 
-    # Custom CSS styles for modern design
+    # Initialize session state
+    if "messages" not in st.session_state:
+        st.session_state.messages = []
+    if "pdf_processed" not in st.session_state:
+        st.session_state.pdf_processed = False
+    if "service_class" not in st.session_state:
+        st.session_state.service_class = None
+
+    # Dark gray theme with proper layout
     st.markdown("""
         <style>
         @import url('https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700&display=swap');
@@ -536,184 +541,175 @@ def main():
             font-family: 'Inter', sans-serif;
         }
         
-        /* Buttons */
-        .stButton>button {
-            background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+        /* Message styling */
+        .user-message {
+            background: #4a5568;
             color: white;
-            border: none;
-            border-radius: 12px;
-            padding: 12px 24px;
-            font-weight: 500;
-            transition: all 0.3s ease;
-            box-shadow: 0 4px 15px rgba(102, 126, 234, 0.3);
+            padding: 15px 20px;
+            border-radius: 20px 20px 5px 20px;
+            margin: 10px 0 10px 50px;
+            box-shadow: 0 4px 15px rgba(74, 85, 104, 0.3);
         }
+        
+        .ai-message {
+            background: #2d3748;
+            color: #e2e8f0;
+            padding: 15px 20px;
+            border-radius: 20px 20px 20px 5px;
+            margin: 10px 50px 10px 0;
+            border: 1px solid #4a5568;
+            box-shadow: 0 4px 15px rgba(0, 0, 0, 0.2);
+        }
+        
+        /* Upload area */
+        .upload-container {
+            background: #2d3748;
+            border: 2px dashed #4a5568;
+            border-radius: 16px;
+            padding: 30px;
+            margin: 20px 0;
+            text-align: center;
+        }
+        
+        /* Input styling */
+        .stTextInput>div>div>input {
+            background: #2d3748 !important;
+            border: 2px solid #4a5568 !important;
+            border-radius: 12px !important;
+            padding: 12px 16px !important;
+            color: white !important;
+            font-size: 16px !important;
+        }
+        
+        .stTextInput>div>div>input:focus {
+            border-color: #667eea !important;
+            box-shadow: 0 0 0 3px rgba(102, 126, 234, 0.1) !important;
+        }
+        
+        /* Button styling */
+        .stButton>button {
+            background: linear-gradient(135deg, #667eea 0%, #764ba2 100%) !important;
+            color: white !important;
+            border: none !important;
+            border-radius: 12px !important;
+            padding: 12px 24px !important;
+            font-weight: 500 !important;
+            transition: all 0.3s ease !important;
+        }
+        
         .stButton>button:hover {
-            transform: translateY(-2px);
-            box-shadow: 0 8px 25px rgba(102, 126, 234, 0.4);
+            transform: translateY(-2px) !important;
+            box-shadow: 0 8px 25px rgba(102, 126, 234, 0.4) !important;
         }
         
         /* File uploader */
         .stFileUploader {
-            border: 2px dashed #667eea;
+            border: 2px dashed #4a5568;
             border-radius: 16px;
             padding: 24px;
-            background: linear-gradient(135deg, rgba(102, 126, 234, 0.05) 0%, rgba(118, 75, 162, 0.05) 100%);
+            background: #2d3748;
         }
         
-        /* Text input */
-        .stTextInput>div>div>input {
-            border: 2px solid #e1e5e9;
-            border-radius: 12px;
-            padding: 12px 16px;
-            font-size: 16px;
-            transition: all 0.3s ease;
-        }
-        .stTextInput>div>div>input:focus {
-            border-color: #667eea;
-            box-shadow: 0 0 0 3px rgba(102, 126, 234, 0.1);
-        }
-        
-        /* Container styles */
-        .upload-container, .question-container {
-            background: white;
-            border-radius: 16px;
-            padding: 24px;
-            margin: 24px 0;
-            box-shadow: 0 4px 20px rgba(0, 0, 0, 0.08);
-            border: 1px solid #f0f0f0;
-        }
-        
-        /* Response container */
-        .response-container {
-            background: white;
-            border-radius: 16px;
-            padding: 0;
-            margin: 24px 0;
-            box-shadow: 0 4px 20px rgba(0, 0, 0, 0.08);
-            border: 1px solid #f0f0f0;
-            overflow: hidden;
-        }
-        
-        .response-header {
-            background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
-            color: white;
-            padding: 16px 24px;
-            display: flex;
-            align-items: center;
-            gap: 12px;
-        }
-        
-        .response-header h3 {
-            margin: 0;
-            font-size: 18px;
-            font-weight: 600;
-        }
-        
-        .response-content {
-            padding: 24px;
-            line-height: 1.6;
-            color: #2d3748;
-        }
-        
-        /* Success messages */
+        /* Success/Error messages */
         .stSuccess {
-            background: linear-gradient(135deg, rgba(72, 187, 120, 0.1) 0%, rgba(56, 178, 172, 0.1) 100%);
-            border-left: 4px solid #48bb78;
-            border-radius: 8px;
+            background: rgba(72, 187, 120, 0.1) !important;
+            border-left: 4px solid #48bb78 !important;
+            border-radius: 8px !important;
+            color: #68d391 !important;
         }
         
-        /* Error messages */
         .stError {
-            background: linear-gradient(135deg, rgba(245, 101, 101, 0.1) 0%, rgba(237, 100, 166, 0.1) 100%);
-            border-left: 4px solid #f56565;
-            border-radius: 8px;
+            background: rgba(245, 101, 101, 0.1) !important;
+            border-left: 4px solid #f56565 !important;
+            border-radius: 8px !important;
+            color: #fc8181 !important;
         }
         
-        /* Hide Streamlit branding */
+        /* Hide Streamlit elements */
         #MainMenu {visibility: hidden;}
         footer {visibility: hidden;}
         header {visibility: hidden;}
+        .stDeployButton {display: none;}
         </style>
     """, unsafe_allow_html=True)
 
-    # Display the app's title with custom styling
-    st.markdown("""
-        <div style="text-align: center; padding: 2rem 0;">
-            <h1 style="background: linear-gradient(135deg, #667eea 0%, #764ba2 100%); -webkit-background-clip: text; -webkit-text-fill-color: transparent; font-size: 3rem; font-weight: 700; margin-bottom: 0.5rem;">
-                <i data-lucide="message-circle"></i> Talk to your PDF
-            </h1>
-            <p style="color: #666; font-size: 1.2rem; margin: 0;">Upload a PDF and ask questions about its content</p>
-        </div>
-        <script src="https://unpkg.com/lucide@latest/dist/umd/lucide.js"></script>
-        <script>lucide.createIcons();</script>
-    """, unsafe_allow_html=True)
+    # Title
+    if not st.session_state.pdf_processed:
+        st.markdown("""
+            <div style="text-align: center; padding: 2rem 0;">
+                <h1 style="color: white; font-size: 3rem; font-weight: 700; margin-bottom: 0.5rem;">
+                    Talk to your PDF
+                </h1>
+                <p style="color: #a0aec0; font-size: 1.2rem; margin: 0;">Upload a PDF and ask questions about its content</p>
+            </div>
+        """, unsafe_allow_html=True)
+    else:
+        st.markdown('<div style="text-align: center; padding: 10px 0;"><h2 style="color: white; margin: 0;">PDF Chat</h2></div>', unsafe_allow_html=True)
 
-    # Create a file uploader widget for PDF files with custom styling
-    
-    st.markdown('<div class="upload-container">', unsafe_allow_html=True)
-    st.markdown("### <i data-lucide='upload'></i> Upload your PDF document", unsafe_allow_html=True)
-    uploaded_file = st.file_uploader("Choose a PDF file to analyze", type=["pdf"])
-    st.markdown('</div>', unsafe_allow_html=True)
-
-    # Check if a file has been uploaded
-    if uploaded_file is not None:
-        # Display an animation while processing the uploaded PDF
-        with st_lottie_spinner(
-            loading_animation, quality="high", height="100px", width="100px"
-        ):
-            process_pre_run(uploaded_file)  # Preprocess the uploaded file
-
-
-
-        # Instantiate the service class for intent processing
-        service_class = IntentService()
-
-        # Create a form for user's questions about the PDF content
-
-        st.markdown('<div class="question-container">', unsafe_allow_html=True)
-        st.markdown("### <i data-lucide='help-circle'></i> Ask a question about the PDF content", unsafe_allow_html=True)
-        with st.form(key="question_form"):
-            user_question = st.text_input(
-                "Enter your question:", key="question_input", placeholder="What is this document about?"
-            )
-            submit_button = st.form_submit_button(label="Ask Question")
+    # PDF Upload
+    if not st.session_state.pdf_processed:
+        st.markdown('<div class="upload-container">', unsafe_allow_html=True)
+        st.markdown('<h3 style="color: white; margin-bottom: 20px;">Upload your PDF document</h3>', unsafe_allow_html=True)
+        uploaded_file = st.file_uploader("Choose a PDF file to analyze", type=["pdf"])
         st.markdown('</div>', unsafe_allow_html=True)
-
-        # Process the question if the submit button is pressed
-        if submit_button:
-            result = process_user_question(service_class, user_question)
-
-            if result[0] is not None:  # If the question is related to the PDF content
-                vectorized_question, question = result
-
-                with st_lottie_spinner(
-                    loading_animation, quality="high", height="100px", width="100px"
-                ):
-                    retrieved_info = process_retrieval(
-                        vectorized_question
-                    )  # Retrieve relevant information
-
-                    final_response = process_response(
-                        retrieved_info, question
-                    )  # Generate and display response
-                    
-                    # Display response in a modern card format
-                    st.markdown("""
-                        <div class="response-container">
-                            <div class="response-header">
-                                <i data-lucide="brain"></i>
-                                <h3>AI Response</h3>
-                            </div>
-                            <div class="response-content">
-                    """, unsafe_allow_html=True)
-                    
-                    st.markdown(final_response)
-                    
-                    st.markdown("""
-                            </div>
-                        </div>
-                        <script>lucide.createIcons();</script>
-                    """, unsafe_allow_html=True)
+        
+        if uploaded_file is not None:
+            with st.spinner("Processing your PDF..."):
+                process_pre_run(uploaded_file)
+                st.session_state.pdf_processed = True
+                st.session_state.service_class = IntentService()
+                st.session_state.messages.append({
+                    "role": "system", 
+                    "content": f"PDF '{uploaded_file.name}' processed successfully! Ask questions about its content."
+                })
+                st.rerun()
+    
+    # Chat Interface
+    if st.session_state.pdf_processed:
+        # Display chat history
+        for message in st.session_state.messages:
+            if message["role"] == "user":
+                st.markdown(f'<div class="user-message">You: {message["content"]}</div>', unsafe_allow_html=True)
+            elif message["role"] == "assistant":
+                st.markdown('<div class="ai-message">AI:</div>', unsafe_allow_html=True)
+                st.markdown(message["content"])
+            elif message["role"] == "system":
+                st.success(message["content"])
+        
+        # Chat input
+        with st.form(key="chat_form", clear_on_submit=True):
+            user_input = st.text_input("Ask a question about the PDF:", placeholder="What is this document about?")
+            submit_button = st.form_submit_button("Send Message")
+        
+        # Process user input
+        if submit_button and user_input:
+            st.session_state.messages.append({"role": "user", "content": user_input})
+            
+            with st_lottie_spinner(loading_animation, quality="high", height="100px", width="100px"):
+                result = process_user_question(st.session_state.service_class, user_input)
+                
+                if result[0] is not None:
+                    vectorized_question, question = result
+                    retrieved_info = process_retrieval(vectorized_question)
+                    final_response = process_response(retrieved_info, question)
+                    st.session_state.messages.append({"role": "assistant", "content": final_response})
+                else:
+                    st.session_state.messages.append({"role": "assistant", "content": "I couldn't process that question. Please try asking something related to the PDF content."})
+            
+            st.rerun()
+        
+        # Reset options
+        col1, col2 = st.columns(2)
+        with col1:
+            if st.button("Upload New PDF"):
+                st.session_state.pdf_processed = False
+                st.session_state.messages = []
+                st.session_state.service_class = None
+                st.rerun()
+        with col2:
+            if st.button("Clear Chat"):
+                st.session_state.messages = []
+                st.rerun()
 
 
 # Entry point of the Streamlit app
