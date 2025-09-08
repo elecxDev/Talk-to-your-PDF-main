@@ -412,7 +412,7 @@ Instructions:
 - Don't add disclaimers about what the context does/doesn't mention
 - Don't explain your limitations or the source material
 - Just answer the question naturally and helpfully
-- If you can't answer, just say "I don't have that information in the document"""")
+- If you can't answer, just say "I don't have that information in the document""")
             ]
             
             response = self.mistral_client.chat(
